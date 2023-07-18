@@ -1,11 +1,15 @@
 import logging
 import math
+import os
 import subprocess
 import time
+from itertools import product
 from pathlib import Path
 
 import boto3
 import h5py
+import numpy as np
+import pandas as pd
 import s3fs
 
 
@@ -36,11 +40,18 @@ def optimize_hdf5(filepath, dataset_path, output_path, chunk_size=8 * MB, page_s
         datatype = file[dataset_path].dtype
         datatype_size = datatype.itemsize
 
-    n_pixels = chunk_size / datatype_size
-    dim_2d = int(math.sqrt(n_pixels))
+    options = ''
+    if page_size:
+        options += f' -S PAGE -G {page_size}'
 
-    cmd = f'h5repack -S PAGE -G {page_size} -l {dataset_path}:CHUNK={dim_2d}x{dim_2d} {filepath} {output_path}'
-    print(f'Running the command: {cmd}')
+    if chunk_size:
+        n_pixels = chunk_size / datatype_size
+        dim_2d = int(math.sqrt(n_pixels))
+        options += f' -l {dataset_path}:CHUNK={dim_2d}x{dim_2d}'
+
+    options += f' {filepath} {output_path}'
+    cmd = 'h5repack' + options
+    print(f'Command: {cmd}')
     subprocess.run(cmd.split(' '))
 
 
@@ -86,7 +97,7 @@ def open_test_dataset():
 def test_routine(filepath, extra_args):
     with h5py.File(filepath, mode='r', **extra_args) as ds:
         vv = ds['science']['LSAR']['SLC']['swaths']['frequencyA']['VV']
-        data = vv[0, 0]
+        # data = vv[0, 0]
         data = vv[3000:8000, 500:2000]
         # data = vv[:, :]
 
@@ -115,21 +126,73 @@ def benchmark(filepath, name, local=True):
     print(f'Number of GET requests: {counter_handler.count}')
 
 
-def benchmark2(filepath, name, page_buf_size=None, rdcc_nbytes=None):
-    extra_args = {}
-    if filepath.startswith('s3') or filepath.startswith('https'):
-        extra_args['driver'] = 'ros3'
+def benchmark2(filepath, name=None, page_buf_size=None, rdcc_nbytes=None, repeat=1):
+    run_times = []
+    for i in range(repeat):
+        extra_args = {}
+        if filepath.startswith('s3') or filepath.startswith('https'):
+            extra_args['driver'] = 'ros3'
 
-    if page_buf_size:
-        extra_args['page_buf_size'] = page_buf_size
+        if page_buf_size:
+            extra_args['page_buf_size'] = page_buf_size
 
-    if rdcc_nbytes:
-        extra_args['rdcc_nbytes'] = rdcc_nbytes
+        if rdcc_nbytes:
+            extra_args['rdcc_nbytes'] = rdcc_nbytes
 
-    start_time = time.time()
-    test_routine(filepath, extra_args)
-    stop_time = time.time()
-    print(f'{name} time: {stop_time-start_time:.4f}')
+        start_time = time.time()
+        test_routine(filepath, extra_args)
+        stop_time = time.time()
+        total_time = stop_time - start_time
+        run_times.append(total_time)
+        if name:
+            print(f'{name} time: {total_time:.4f}')
+
+    return np.min(run_times)
+
+
+def prep_test_dataset(filepath, dataset_path, output_s3_bucket, output_s3_path, chunk_size=8 * MB, page_size=2 * MB):
+    optimize_hdf5(filepath, dataset_path, 'tmp.h5', chunk_size, page_size)
+    S3.upload_file('tmp.h5', output_s3_bucket, output_s3_path)
+    os.remove('tmp.h5')
+
+
+def prep_page_dataset_set():
+    file = 'Haywrd_14501_21043_012_210602_L090_CX_129_02.h5'
+    dataset = '/science/LSAR/SLC/swaths/frequencyA/VV'
+    bucket = 'ffwilliams2-shenanigans'
+    prefix = 'h5repack'
+    page_sizes = [1, 2, 4, 8, 16]
+    for page_size in page_sizes:
+        prep_test_dataset(
+            file,
+            dataset,
+            bucket,
+            f'{prefix}/reoptimize_page{page_size}MB.h5',
+            chunk_size=None,
+            page_size=page_size * MB,
+        )
+
+
+def run_page_benchmarks():
+    page_sizes = [1, 2, 4, 8, 16]
+    page_buffer_sizes = [2, 8, 32, 128, 512]
+
+    run_page_size, run_page_buffer_size, run_time = [[], [], []]
+    rows = []
+    for page_size, page_buffer_size in product(page_sizes, page_buffer_sizes):
+        if page_size > page_buffer_size:
+            continue
+        time = benchmark2(
+            base_s3_url + f'reoptimize_page{page_size}MB.h5',
+            page_buf_size=page_buffer_size * MB,
+            rdcc_nbytes=None,
+            repeat=5,
+        )
+        rows.append([page_size, page_buffer_size, time])
+
+    df = pd.DataFrame(rows)
+    df.columns = ['page_size', 'page_buffer_size', 'time']
+    df.to_csv('page_results.csv', index=False)
 
 
 def run_benchmarks():
@@ -141,10 +204,14 @@ def run_benchmarks():
 
 
 if __name__ == '__main__':
-    file = 'Haywrd_14501_21043_012_210602_L090_CX_129_02.h5'
-    benchmark2(file, 'local')
-    benchmark2(base_s3_url + file, 's3 base')
-    benchmark2(base_s3_url + 'nisar_repaged.h5', 's3 modified', page_buf_size=4 * MB, rdcc_nbytes=64*MB)
-    benchmark2(
-        base_s3_url + 'nisar_repaged_rechunked.h5', 's3 modified chunk', page_buf_size=8 * MB, rdcc_nbytes=128 * MB
-    )
+    # prep_page_dataset_set()
+    run_page_benchmarks()
+
+    # file = 'Haywrd_14501_21043_012_210602_L090_CX_129_02.h5'
+    # optimize_hdf5(file, '/science/LSAR/SLC/swaths/frequencyA/VV', 'tmp.h5')
+    # benchmark2(file, 'local')
+    # benchmark2(base_s3_url + file, 's3 base')
+    # benchmark2(base_s3_url + 'nisar_repaged.h5', 's3 modified', page_buf_size=4 * MB, rdcc_nbytes=64*MB)
+    # benchmark2(
+    #     base_s3_url + 'nisar_repaged_rechunked.h5', 's3 modified chunk', page_buf_size=8 * MB, rdcc_nbytes=128 * MB
+    # )

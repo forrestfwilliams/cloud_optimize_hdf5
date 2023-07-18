@@ -17,6 +17,8 @@ cache size: [2, 8, 32, 128, 512]
 combine these into 25 unique combinations
 read only the first data cell
 
+combination of page_size=2, and page_buffer=8 seems to be the best
+
 ### Chunk Size
 pick five reasonable values for each 
 chunk size: [4, 8, 16, 24, 48]

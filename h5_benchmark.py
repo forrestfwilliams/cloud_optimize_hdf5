@@ -156,21 +156,43 @@ def prep_test_dataset(filepath, dataset_path, output_s3_bucket, output_s3_path, 
     os.remove('tmp.h5')
 
 
-def prep_page_dataset_set():
+def prep_random_bytes(num_bytes, output_s3_bucket, output_s3_path):
+    with open('tmp.bin', 'wb') as file:
+        random_bytes = os.urandom(num_bytes)
+        file.write(random_bytes)
+    S3.upload_file('tmp.bin', output_s3_bucket, output_s3_path)
+    os.remove('tmp.bin')
+
+
+def prep_dataset_set():
     file = 'Haywrd_14501_21043_012_210602_L090_CX_129_02.h5'
     dataset = '/science/LSAR/SLC/swaths/frequencyA/VV'
     bucket = 'ffwilliams2-shenanigans'
     prefix = 'h5repack'
-    page_sizes = [1, 2, 4, 8, 16]
-    for page_size in page_sizes:
+    # page_sizes = [1, 2, 4, 8, 16]
+    # for page_size in page_sizes:
+    #     prep_test_dataset(
+    #         file,
+    #         dataset,
+    #         bucket,
+    #         f'{prefix}/reoptimize_page{page_size}MB.h5',
+    #         chunk_size=None,
+    #         page_size=page_size * MB,
+    #     )
+    chunk_sizes = [2, 4, 8, 16, 24, 48]
+    for chunk_size in chunk_sizes:
         prep_test_dataset(
             file,
             dataset,
             bucket,
-            f'{prefix}/reoptimize_page{page_size}MB.h5',
-            chunk_size=None,
-            page_size=page_size * MB,
+            f'{prefix}/reoptimize_page2MB_chunk{chunk_size}.h5',
+            chunk_size=chunk_size * MB,
+            page_size=2 * MB,
         )
+
+    # a quarter of the example dataset size
+    n_bytes = 7072*1320*8
+    prep_random_bytes(n_bytes, bucket, f'{prefix}/random_bytes_{int(n_bytes / MB)}MB.bin')
 
 
 def run_page_benchmarks():
@@ -204,8 +226,8 @@ def run_benchmarks():
 
 
 if __name__ == '__main__':
-    # prep_page_dataset_set()
-    run_page_benchmarks()
+    prep_dataset_set()
+    # run_page_benchmarks()
 
     # file = 'Haywrd_14501_21043_012_210602_L090_CX_129_02.h5'
     # optimize_hdf5(file, '/science/LSAR/SLC/swaths/frequencyA/VV', 'tmp.h5')

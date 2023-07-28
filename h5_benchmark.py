@@ -5,7 +5,6 @@ import os
 import subprocess
 import time
 from itertools import product
-from pathlib import Path
 
 import boto3
 import h5py
@@ -31,6 +30,57 @@ bucket_name = 'ffwilliams2-shenanigans'
 prefix = 'h5repack'
 base_s3_url = f's3://{bucket_name}/{prefix}/'
 base_s3_url = f'https://{bucket_name}.s3.us-west-2.amazonaws.com/{prefix}/'
+
+
+class GetRequestCounter(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.count = 0
+
+    def emit(self, record):
+        if record.getMessage().startswith('CALL: get_object'):
+            self.count += 1
+
+
+def print_hdf5_information(file, dataset):
+    datatype = dataset.dtype
+    print('Datatype:')
+    print('  Name:', datatype.name)
+    print('  Bytes per Item:', datatype.itemsize)
+    chunks = dataset.chunks
+    print('Chunk Layout:')
+    print('  Chunk Shape:', chunks)
+    print('  Chunk Size (MB):', (chunks[0] * chunks[1] * datatype.itemsize) / MB)
+    _, rdcc_nslots, rdcc_nbytes, rdcc_w0 = file.id.get_access_plist().get_cache()
+    print('Chunk Cache Size (MB):', rdcc_nbytes / MB)
+    mdc_nbytes = file.id.get_mdc_config().initial_size
+    mdc_min_nbytes = file.id.get_mdc_config().min_size
+    print('Metadata Cache Size (MB):', mdc_nbytes / MB)
+    print('Metadata Cache Min Size (MB):', mdc_min_nbytes / MB)
+
+
+def benchmark(filepath, name, local=True):
+    logger = logging.getLogger('s3fs')
+    counter_handler = GetRequestCounter()
+    logger.addHandler(counter_handler)
+    logger.setLevel(logging.DEBUG)
+    extra_args = {}
+    if 'repaged' in filepath:
+        extra_args['page_buf_size'] = 8 * MB
+
+    if 'rechunkeed' in filepath:
+        extra_args['rdcc_bytes'] = 64 * MB
+
+    start_time = time.time()
+    if local:
+        with open(filepath, 'rb') as fobj:
+            test_routine(fobj, extra_args)
+    else:
+        with S3_FILESYSTEM.open(filepath, mode='rb') as fobj:
+            test_routine(fobj, extra_args)
+    stop_time = time.time()
+    print(f'{name} time: {stop_time-start_time:.4f}')
+    print(f'Number of GET requests: {counter_handler.count}')
 
 
 def optimize_hdf5(filepath, dataset_path, output_path, chunk_size=8 * MB, page_size=2 * MB):
@@ -61,33 +111,6 @@ def upload_test_datasets(dataset_names, bucket, prefix_path):
         S3.upload_file(name, bucket, f'{prefix_path}/name')
 
 
-class GetRequestCounter(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.count = 0
-
-    def emit(self, record):
-        if record.getMessage().startswith('CALL: get_object'):
-            self.count += 1
-
-
-def print_hdf5_information(file, dataset):
-    datatype = dataset.dtype
-    print('Datatype:')
-    print('  Name:', datatype.name)
-    print('  Bytes per Item:', datatype.itemsize)
-    chunks = dataset.chunks
-    print('Chunk Layout:')
-    print('  Chunk Shape:', chunks)
-    print('  Chunk Size (MB):', (chunks[0] * chunks[1] * datatype.itemsize) / MB)
-    _, rdcc_nslots, rdcc_nbytes, rdcc_w0 = file.id.get_access_plist().get_cache()
-    print('Chunk Cache Size (MB):', rdcc_nbytes / MB)
-    mdc_nbytes = file.id.get_mdc_config().initial_size
-    mdc_min_nbytes = file.id.get_mdc_config().min_size
-    print('Metadata Cache Size (MB):', mdc_nbytes / MB)
-    print('Metadata Cache Min Size (MB):', mdc_min_nbytes / MB)
-
-
 def open_test_dataset():
     with open('Haywrd_14501_21043_012_210602_L090_CX_129_02.h5', mode='rb') as fobj:
         with h5py.File(fobj, mode='r') as hdf_file:
@@ -98,31 +121,7 @@ def open_test_dataset():
 def test_routine(filepath, extra_args, index_exp=np.index_exp[0, 0]):
     with h5py.File(filepath, mode='r', **extra_args) as ds:
         vv = ds['science']['LSAR']['SLC']['swaths']['frequencyA']['VV']
-        data = vv[index_exp]
-
-
-def benchmark(filepath, name, local=True):
-    logger = logging.getLogger('s3fs')
-    counter_handler = GetRequestCounter()
-    logger.addHandler(counter_handler)
-    logger.setLevel(logging.DEBUG)
-    extra_args = {}
-    if 'repaged' in filepath:
-        extra_args['page_buf_size'] = 8 * MB
-
-    if 'rechunkeed' in filepath:
-        extra_args['rdcc_bytes'] = 64 * MB
-
-    start_time = time.time()
-    if local:
-        with open(filepath, 'rb') as fobj:
-            test_routine(fobj, extra_args)
-    else:
-        with S3_FILESYSTEM.open(filepath, mode='rb') as fobj:
-            test_routine(fobj, extra_args)
-    stop_time = time.time()
-    print(f'{name} time: {stop_time-start_time:.4f}')
-    print(f'Number of GET requests: {counter_handler.count}')
+        vv[index_exp]
 
 
 def benchmark2(filepath, name=None, page_buf_size=None, rdcc_nbytes=None, index_exp=np.index_exp[0, 0], repeat=1):
@@ -177,7 +176,7 @@ def prep_dataset_set():
             chunk_size=None,
             page_size=page_size * MB,
         )
-    chunk_sizes = [2, 4, 8, 16, 24, 48]
+    chunk_sizes = [1, 2, 4, 8, 16, 24]
     for chunk_size in chunk_sizes:
         prep_test_dataset(
             file,
@@ -194,9 +193,8 @@ def prep_dataset_set():
 
 def run_page_benchmarks():
     page_sizes = [1, 2, 4, 8, 16]
-    page_buffer_sizes = [2, 8, 32, 128, 512]
+    page_buffer_sizes = [2, 4, 8, 32, 128, 512]
 
-    run_page_size, run_page_buffer_size, run_time = [[], [], []]
     rows = []
     for page_size, page_buffer_size in product(page_sizes, page_buffer_sizes):
         if page_size > page_buffer_size:
@@ -215,14 +213,14 @@ def run_page_benchmarks():
 
 
 def run_chunk_benchmarks():
-    chunk_sizes = [4, 8, 16, 24, 48]
-    chunk_buffer_sizes = [4, 16, 64, 256, 1024]
+    chunk_sizes = [1, 2, 4, 8, 16]
+    chunk_buffer_sizes = [4, 8, 16, 32, 64]
     index_exp = np.index_exp[1000:8072, 1000:2320]
 
     rows = []
     for chunk_size, chunk_buffer_size in product(chunk_sizes, chunk_buffer_sizes):
         time = benchmark2(
-            base_s3_url + f'reoptimize_page2MB_chunk{chunk_size}.h5',
+            base_s3_url + f'reoptimize_page2MB_chunk{chunk_size}MB.h5',
             page_buf_size=4 * MB,
             rdcc_nbytes=chunk_buffer_size * MB,
             index_exp=index_exp,
@@ -237,8 +235,14 @@ def run_chunk_benchmarks():
 
 def run_control_benchmarks():
     origional_filename = 'Haywrd_14501_21043_012_210602_L090_CX_129_02.h5'
+    local_metadata_time = benchmark2(origional_filename, repeat=5)
+    s3_metadata_time = benchmark2(base_s3_url + origional_filename, repeat=5)
+
     index_exp = np.index_exp[1000:8072, 1000:2320]
-    origional_s3_time = benchmark2(base_s3_url + origional_filename, index_exp=index_exp, repeat=5)
+    s3_time = benchmark2(base_s3_url + origional_filename, index_exp=index_exp, repeat=5)
+    paged_only_time = benchmark2(
+        base_s3_url + 'reoptimize_page2MB.h5', page_buf_size=4 * MB, index_exp=index_exp, repeat=5
+    )
 
     raw_bytes_times = []
     for _ in range(5):
@@ -246,17 +250,22 @@ def run_control_benchmarks():
         tmp_s3_client = boto3.client('s3')
         response = tmp_s3_client.get_object(Bucket='ffwilliams2-shenanigans', Key='h5repack/random_array_7072x1320.npy')
         byte_data = response['Body'].read()
-        array = np.load(io.BytesIO(byte_data))
+        np.load(io.BytesIO(byte_data))
         stop_time = time.time()
         raw_bytes_times.append(stop_time - start_time)
     raw_bytes_time = np.min(raw_bytes_times)
 
-    df = pd.DataFrame([['unaltered hdf5', 'raw bytes'], [origional_s3_time, raw_bytes_time]])
-    df.columns = ['name', 'time']
+    names = ['local (metadata only)', 's3 (metadata only)', 's3', 'paged only', 'raw bytes']
+    times = [local_metadata_time, s3_metadata_time, s3_time, paged_only_time, raw_bytes_time]
+    df = pd.DataFrame({'name': names, 'time': times})
     df.to_csv('control_results.csv', index=False)
 
 
 if __name__ == '__main__':
+    with h5py.File('Haywrd_14501_21043_012_210602_L090_CX_129_02.h5') as file:
+        vv = file['science']['LSAR']['SLC']['swaths']['frequencyA']['VV']
+        print_hdf5_information(file, vv)
+
     prep_dataset_set()
     run_page_benchmarks()
     run_chunk_benchmarks()

@@ -93,9 +93,12 @@ def get_metadata_size(filepath):
     return metadata_size_bytes
 
 
-def optimize_hdf5(filepath, output_path, dataset_path=None, chunk_size=8 * MB, page_size=2 * MB):
+def optimize_hdf5(filepath, output_path, dataset_path=None, chunk_size=8 * MB, page_size=2 * MB, auto_page_size=False):
     options = ''
-    if page_size:
+    if auto_page_size:
+        metadata_size_bytes = get_metadata_size(filepath)
+        options += f' -S PAGE -G {metadata_size_bytes + 1024}'
+    elif page_size:
         metadata_size_bytes = get_metadata_size(filepath)
         print(f'Metadata size / Page size = {metadata_size_bytes / page_size:.2f}')
         options += f' -S PAGE -G {page_size}'

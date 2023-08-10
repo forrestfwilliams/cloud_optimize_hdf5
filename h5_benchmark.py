@@ -83,19 +83,28 @@ def benchmark(filepath, name, local=True):
     print(f'Number of GET requests: {counter_handler.count}')
 
 
-def optimize_hdf5(filepath, dataset_path, output_path, chunk_size=8 * MB, page_size=2 * MB):
-    # TODO find way to get file metadata_size
-    metadata_size = 689984
-    assert page_size >= metadata_size
-    with h5py.File(filepath, mode='r') as file:
-        datatype = file[dataset_path].dtype
-        datatype_size = datatype.itemsize
+def get_metadata_size(filepath):
+    cmd = f'h5stat {filepath}'
+    output = subprocess.run(cmd.split(' '), stdout=subprocess.PIPE, text=True).stdout
+    cleaned_lines = [line.strip() for line in output.replace('\t', '').strip().split('\n')]
+    metadata_size_line = [line for line in cleaned_lines if 'File metadata' in line][0]
+    _, _, metadata_size_text, _ = metadata_size_line.split(' ')
+    metadata_size_bytes = int(metadata_size_text)
+    return metadata_size_bytes
 
+
+def optimize_hdf5(filepath, output_path, dataset_path=None, chunk_size=8 * MB, page_size=2 * MB):
     options = ''
     if page_size:
+        metadata_size_bytes = get_metadata_size(filepath)
+        print(f'Metadata size / Page size = {metadata_size_bytes / page_size:.2f}')
         options += f' -S PAGE -G {page_size}'
 
-    if chunk_size:
+    if chunk_size and dataset_path:
+        with h5py.File(filepath, mode='r') as file:
+            datatype = file[dataset_path].dtype
+            datatype_size = datatype.itemsize
+
         n_pixels = chunk_size / datatype_size
         dim_2d = int(math.sqrt(n_pixels))
         options += f' -l {dataset_path}:CHUNK={dim_2d}x{dim_2d}'
@@ -149,7 +158,7 @@ def benchmark2(filepath, name=None, page_buf_size=None, rdcc_nbytes=None, index_
 
 
 def prep_test_dataset(filepath, dataset_path, output_s3_bucket, output_s3_path, chunk_size=8 * MB, page_size=2 * MB):
-    optimize_hdf5(filepath, dataset_path, 'tmp.h5', chunk_size, page_size)
+    optimize_hdf5(filepath, 'tmp.h5', dataset_path, chunk_size, page_size)
     S3.upload_file('tmp.h5', output_s3_bucket, output_s3_path)
     os.remove('tmp.h5')
 
